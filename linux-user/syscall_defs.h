@@ -2476,4 +2476,6 @@ struct target_ucred {
     uint32_t gid;
 };
 
+#include "ioctls_alsa_structs.h"
+
 #endif
