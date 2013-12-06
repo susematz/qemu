@@ -2735,8 +2735,8 @@ static void handle_simdorr(DisasContext *s, uint32_t insn)
     tcg_temp_free_i64(tcg_res_2);
 }
 
-/* SIMD 3 same (U=0) */
-static void handle_simd3su0(DisasContext *s, uint32_t insn)
+/* SIMD 3 same */
+static void handle_simd3s(DisasContext *s, uint32_t insn)
 {
     int rd = get_bits(insn, 0, 5);
     int rn = get_bits(insn, 5, 5);
@@ -2762,6 +2762,13 @@ static void handle_simd3su0(DisasContext *s, uint32_t insn)
 	if (is_u && size != 0) {
 	    /* PMUL is only defined for bytes.  */
 	    unallocated_encoding(s);
+	    return;
+	}
+	break;
+    case 0x1f: /* FDIV / FRSQRTS / FRECPS */
+	if (!is_u || (size & 2) != 0) {
+	    /* Can't handle FRSQRTS / FRECPS yet.  */
+	    unallocated_encoding (s);
 	    return;
 	}
 	break;
@@ -2874,6 +2881,24 @@ static void handle_simd3su0(DisasContext *s, uint32_t insn)
 	      tcg_temp_free_ptr(fpst);
 	      break;
 	    }
+
+	case 0x1f: /* FDIV */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+
+	      if (!is_q && size == 1) {
+		  unallocated_encoding(s);
+		  return;
+	      }
+	      if (size == 0) {
+		  gen_helper_vfp_divs(tcg_res, tcg_op1, tcg_op2, fpst);
+	      } else {
+		  gen_helper_vfp_divd(tcg_res, tcg_op1, tcg_op2, fpst);
+	      }
+	      
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
 
 	case 0x08: /* SSHL / USHL */
 	case 0x09: /* SQSHL / UQSHL (saturating) */
@@ -3230,7 +3255,43 @@ static void handle_simd_misc(DisasContext *s, uint32_t insn)
 	    simd_st(tcg_res, freg_offs_d + sizeof(float64), 3);
 	}
 	break;
-
+    case 0x0b: /* NEG */
+	{
+	  bool is_scalar = get_bits(insn, 28, 1);
+	  if (is_scalar) {
+	      if (size != 3) {
+		  unallocated_encoding(s);
+		  return;
+	      }
+	      simd_ld(tcg_op1, freg_offs_n, 3, false);
+	      tcg_gen_neg_i64(tcg_res, tcg_op1);
+	      simd_st(tcg_res, freg_offs_d, 3);
+	  } else {
+	      TCGv_i64 zero = tcg_temp_new_i64();
+	      zero = tcg_const_i64(0);
+	      for (i = 0; i < (is_q ? 16 : 8); i += ebytes)
+	      {
+		  simd_ld(tcg_op1, freg_offs_n + i, size, true);
+		  switch (size) {
+		  case 0: /* bytes */
+		      gen_helper_neon_sub_u8(tcg_res, zero, tcg_op1);
+		      break;
+		  case 1: /* halfwords.  */
+		      gen_helper_neon_sub_u16(tcg_res, zero, tcg_op1);
+		      break;
+		  case 2: /* words.  */
+		      tcg_gen_sub_i32(tcg_res, zero, tcg_op1);
+		      break;
+		  case 3: /* doublewords.  */
+		      tcg_gen_sub_i64(tcg_res, zero, tcg_op1);
+		      break;
+		  }
+		  simd_st(tcg_res, freg_offs_d + i, size);
+	      }
+	      tcg_temp_free_i64(zero);
+	  }
+	}
+	break;
     default:
 	unallocated_encoding(s);
 	return;
@@ -3303,7 +3364,7 @@ static void handle_simdmovi(DisasContext *s, uint32_t insn)
         } else if (!(cmode & 1) && is_neg) {
             imm = 0;
             for (i = 0; i < 8; i++) {
-                if ((abcdefgh) & (1 << (7 - i))) {
+                if ((abcdefgh) & (1 << i)) {
                     imm |= 0xffULL << (i * 8);
                 }
             }
@@ -3340,14 +3401,16 @@ static void handle_simdmovi(DisasContext *s, uint32_t insn)
     if ((cmode == 0xf) && is_neg && !is_q) {
         unallocated_encoding(s);
         return;
-    } else if ((cmode & 1) && is_neg) {
-        /* AND (BIC) */
-        tcg_gen_and_i64(tcg_res_1, tcg_op1_1, tcg_imm);
-        tcg_gen_and_i64(tcg_res_2, tcg_op1_2, tcg_imm);
-    } else if ((cmode & 1) && !is_neg) {
-        /* ORR */
-        tcg_gen_or_i64(tcg_res_1, tcg_op1_1, tcg_imm);
-        tcg_gen_or_i64(tcg_res_2, tcg_op1_2, tcg_imm);
+    } else if ((cmode & 0x9) == 0x1 || (cmode & 0xd) == 0x9) {
+	if (is_neg) {
+            /* AND (BIC) */
+            tcg_gen_and_i64(tcg_res_1, tcg_op1_1, tcg_imm);
+            tcg_gen_and_i64(tcg_res_2, tcg_op1_2, tcg_imm);
+	} else {
+            /* ORR */
+            tcg_gen_or_i64(tcg_res_1, tcg_op1_1, tcg_imm);
+            tcg_gen_or_i64(tcg_res_2, tcg_op1_2, tcg_imm);
+	}
     } else {
         /* MOVI */
         tcg_gen_mov_i64(tcg_res_1, tcg_imm);
@@ -4008,7 +4071,7 @@ void disas_a64_insn(CPUARMState *env, DisasContext *s)
 	    if (get_bits(insn, 11, 5) == 0x3)
 	      handle_simdorr(s, insn);
 	    else
-	      handle_simd3su0(s, insn);
+	      handle_simd3s(s, insn);
 	} else if (get_bits(insn, 21, 1) && !get_bits(insn, 10, 2)) {
 	    handle_simd3d(s, insn);
 	} else if (get_bits(insn, 17, 5) == 0x18 &&
