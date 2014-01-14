@@ -2626,6 +2626,38 @@ static void handle_v3add(DisasContext *s, uint32_t insn)
     tcg_temp_free_i64(tcg_res);
 }
 
+/* SIMD pairwise (integer) add.  */
+
+static void handle_addp(DisasContext *s, uint32_t insn)
+{
+    int rd = get_bits(insn, 0, 5);
+    int rn = get_bits(insn, 5, 5);
+    int size = get_bits(insn, 22, 2);
+    int ebytes = 1 << size;
+    int freg_offs_d = offsetof(CPUARMState, vfp.regs[rd * 2]);
+    int freg_offs_n = offsetof(CPUARMState, vfp.regs[rn * 2]);
+    TCGv_i64 tcg_op1 = tcg_temp_new_i64();
+    TCGv_i64 tcg_op2 = tcg_temp_new_i64();
+    TCGv_i64 tcg_res = tcg_temp_new_i64();
+
+    if (size != 3) {
+	unallocated_encoding(s);
+	return;
+    }
+
+    simd_ld(tcg_op1, freg_offs_n, size, false);
+    simd_ld(tcg_op2, freg_offs_n + ebytes, size, false);
+
+    tcg_gen_add_i64(tcg_res, tcg_op1, tcg_op2);
+
+    clear_fpreg(rd);
+    simd_st(tcg_res, freg_offs_d, size);
+
+    tcg_temp_free_i64(tcg_op1);
+    tcg_temp_free_i64(tcg_op2);
+    tcg_temp_free_i64(tcg_res);
+}
+
 /* SIMD scalar pairwise, floating point single precision.  */
 
 static void handle_scpsp(DisasContext *s, uint32_t insn)
@@ -2839,7 +2871,7 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
     int opcode = get_bits(insn, 11, 5);
     bool is_q = get_bits(insn, 30, 1);
     bool is_u = get_bits(insn, 29, 1);
-    bool is_pair = is_u;
+    bool is_pair = false;
     bool is_float = false;
     bool is_op2 = false;
     int freg_offs_d = offsetof(CPUARMState, vfp.regs[rd * 2]);
@@ -2851,7 +2883,7 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
     TCGv_i64 tcg_acc;
     bool uses_accum = false;
     int ebytes = (1 << size);
-    int i;
+    int i, cmp;
 
     switch (opcode) {
     case 0x13: /* MUL / PMUL */
@@ -2861,12 +2893,25 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
 	    return;
 	}
 	break;
+    case 0x18: /* FMAXNM / FMINNM / FMAXNMP / FMINNMP */
+	is_op2 = size & 2;
+	size = (size & 1) + 2;
+	ebytes = (1 << size);
+	is_pair = is_u;
+	is_u = true;
+	break;
     case 0x19: /* FMLA / FMLS */
 	tcg_acc = tcg_temp_new_i64();
 	uses_accum = true;
 	/* Fallthrough */
     case 0x1b: /* FMUL / FMULX */
 	is_op2 = size & 2;
+	size = (size & 1) + 2;
+	ebytes = (1 << size);
+	is_u = true;
+	break;
+    case 0x1c: /* FCMEQ / FCMGE / FCMGT */
+	cmp = (size & 2) | is_u;
 	size = (size & 1) + 2;
 	ebytes = (1 << size);
 	is_u = true;
@@ -2887,12 +2932,16 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
 	is_op2 = size & 2;
 	size = (size & 1) + 2;
 	ebytes = (1 << size);
-	is_u = true;
-	if (is_pair) {
-	    /* XXX Can't yet handle.  */
-	    unallocated_encoding(s);
-	    return;
+	if (is_u) {
+	    if (is_op2) {
+		/* FABD unimplemented.  */
+		unallocated_encoding(s);
+		return;
+	    } else {
+		is_pair = true;
+	    }
 	}
+	is_u = true;
 	break;
     }
 
@@ -2901,8 +2950,20 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
        but we still do the loop element-wise, i.e. do four times or
        twice as much work as needed.  */
     for (i = 0; i < (is_q ? 16 : 8); i += ebytes) {
-        simd_ld(tcg_op1, freg_offs_n + i, size, !is_u);
-        simd_ld(tcg_op2, freg_offs_m + i, size, !is_u);
+	if (is_pair) {
+	    int regsize = is_q ? 16 : 8;
+	    if (i * 2 < regsize) {
+		simd_ld(tcg_op1, freg_offs_n + 2 * i, size, !is_u);
+		simd_ld(tcg_op2, freg_offs_n + 2 * i + ebytes, size, !is_u);
+	    } else {
+		simd_ld(tcg_op1, freg_offs_m + 2 * i - regsize, size, !is_u);
+		simd_ld(tcg_op2, freg_offs_m + 2 * i + ebytes - regsize, size,
+			!is_u);
+	    }
+	} else {
+	    simd_ld(tcg_op1, freg_offs_n + i, size, !is_u);
+	    simd_ld(tcg_op2, freg_offs_m + i, size, !is_u);
+	}
 
         switch (opcode) {
         case 0x10: /* ADD / SUB */
@@ -2963,6 +3024,30 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
 	    tcg_gen_subi_i64 (tcg_res, tcg_res, 1);
 	    break;
 
+	case 0x18: /* FMAXNM / FMINNM / FMAXNMP / FMINNMP */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+
+	      if (is_op2) {
+		  /* FMINNM / FMINNMP */
+		  if (size == 2) {
+		      gen_helper_vfp_minnms(tcg_res, tcg_op1, tcg_op2, fpst);
+		  } else {
+		      gen_helper_vfp_minnmd(tcg_res, tcg_op1, tcg_op2, fpst);
+		  }
+	      } else {
+		  /* FMAXNM / FMAXNMP */
+		  if (size == 2) {
+		      gen_helper_vfp_maxnms(tcg_res, tcg_op1, tcg_op2, fpst);
+		  } else {
+		      gen_helper_vfp_maxnmd(tcg_res, tcg_op1, tcg_op2, fpst);
+		  }
+	      }
+	      
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
+
 	case 0x19: /* FMLA / FMLS */
 	    {
 	      TCGv_ptr fpst = get_fpstatus_ptr();
@@ -3009,7 +3094,7 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
 	      }
 
 	      switch (is_op2 << 8 | opcode) {
-	      case 0x01a: /* FADD */
+	      case 0x01a: /* FADD / FADDP */
 		  if (size == 2)
 		    gen_helper_vfp_adds(tcg_res, tcg_op1, tcg_op2, fpst);
 		  else
@@ -3039,6 +3124,41 @@ static void handle_simd3s(DisasContext *s, uint32_t insn)
 		  gen_helper_vfp_muls(tcg_res, tcg_op1, tcg_op2, fpst);
 	      } else {
 		  gen_helper_vfp_muld(tcg_res, tcg_op1, tcg_op2, fpst);
+	      }
+	      
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
+
+	case 0x1c: /* FCMEQ / FCMGE / FCMGT */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+
+	      switch (cmp) {
+	      case 0: /* EQ */
+		  if (size == 2) {
+		      gen_helper_neon_ceq_f32(tcg_res, tcg_op1, tcg_op2, fpst);
+		  } else {
+		      gen_helper_neon_ceq_f64(tcg_res, tcg_op1, tcg_op2, fpst);
+		  }
+		  break;
+	      case 1: /* GE */
+		  if (size == 2) {
+		      gen_helper_neon_cge_f32(tcg_res, tcg_op1, tcg_op2, fpst);
+		  } else {
+		      gen_helper_neon_cge_f64(tcg_res, tcg_op1, tcg_op2, fpst);
+		  }
+		  break;
+	      case 3: /* GT */
+		  if (size == 2) {
+		      gen_helper_neon_cgt_f32(tcg_res, tcg_op1, tcg_op2, fpst);
+		  } else {
+		      gen_helper_neon_cgt_f64(tcg_res, tcg_op1, tcg_op2, fpst);
+		  }
+		  break;
+	      default:
+		  unallocated_encoding(s);
+		  return;
 	      }
 	      
 	      tcg_temp_free_ptr(fpst);
@@ -3136,6 +3256,12 @@ static void handle_simd3d(DisasContext *s, uint32_t insn)
         simd_ld(tcg_op2, freg_offs_m + e * ebytes, size, !is_u);
 
         switch (opcode) {
+	case 0x0: /* SADDL / SADDL2 / UADDL / UADDL2 */
+	    tcg_gen_add_i64(tcg_res, tcg_op1, tcg_op2);
+	    break;
+	case 0x2: /* SSUBL / SSUBL2 / USUBL / USUBL2 */
+	    tcg_gen_sub_i64(tcg_res, tcg_op1, tcg_op2);
+	    break;
 	case 0xc: /* SMULL / UMULL */
 	    tcg_gen_mul_i64(tcg_res, tcg_op1, tcg_op2);
 	    break;
@@ -3270,12 +3396,27 @@ static void handle_simd_accross(DisasContext *s, uint32_t insn)
     int opcode = get_bits(insn, 12, 5);
     bool is_q = get_bits(insn, 30, 1);
     bool is_u = get_bits(insn, 29, 1);
+    bool is_op2 = false;
     int freg_offs_d = offsetof(CPUARMState, vfp.regs[rd * 2]);
     int freg_offs_n = offsetof(CPUARMState, vfp.regs[rn * 2]);
     TCGv_i64 tcg_op1 = tcg_temp_new_i64();
     TCGv_i64 tcg_res = tcg_temp_new_i64();
     int ebytes = (1 << size);
     int i;
+
+    switch (opcode) {
+    case 0x0c: /* FMAXNMV / FMINNMV */
+    case 0x0f: /* FMAXV / FMINV */
+	is_op2 = size & 2;
+	size = (size & 1) + 2;
+	ebytes = (1 << size);
+	if (!is_q || size != 2) {
+	    /* Only the ".4S" arrangement is defined for these operations.  */
+	    unallocated_encoding(s);
+	    return;
+	}
+	break;
+    }
 
     /* For the non-floats size can't be 3, and if it's 2 then
        Q is set (128 bits).  So for ADDLV which uses a 2*esize
@@ -3314,8 +3455,33 @@ static void handle_simd_accross(DisasContext *s, uint32_t insn)
 	    break;
 
 	case 0x0c: /* FMAXNMV / FMINNMV */
-	case 0x0f: /* FMAXV / FMINV*/
-	    /* We don't yet implement these.  */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+	      if (is_op2) {
+		  /* FMINNMV */
+		  gen_helper_vfp_minnms(tcg_res, tcg_op1, tcg_res, fpst);
+	      } else {
+		  /* FMAXNMV */
+		  gen_helper_vfp_maxnms(tcg_res, tcg_op1, tcg_res, fpst);
+	      }
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
+
+	case 0x0f: /* FMAXV / FMINV */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+	      if (is_op2) {
+		  /* FMINV */
+		  gen_helper_vfp_mins(tcg_res, tcg_op1, tcg_res, fpst);
+	      } else {
+		  /* FMAXV */
+		  gen_helper_vfp_maxs(tcg_res, tcg_op1, tcg_res, fpst);
+	      }
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
+
 	default:
 	    unallocated_encoding(s);
 	    return;
@@ -3423,39 +3589,118 @@ static void handle_simd_misc(DisasContext *s, uint32_t insn)
 	break;
     case 0x0b: /* NEG */
 	{
-	  bool is_scalar = get_bits(insn, 28, 1);
-	  if (is_scalar) {
-	      if (size != 3) {
-		  unallocated_encoding(s);
-		  return;
+	  TCGv_i64 zero = tcg_temp_new_i64();
+	  zero = tcg_const_i64(0);
+	  for (i = 0; i < (is_q ? 16 : 8); i += ebytes) {
+	      simd_ld(tcg_op1, freg_offs_n + i, size, true);
+	      switch (size) {
+	      case 0: /* bytes */
+		  gen_helper_neon_sub_u8(tcg_res, zero, tcg_op1);
+		  break;
+	      case 1: /* halfwords.  */
+		  gen_helper_neon_sub_u16(tcg_res, zero, tcg_op1);
+		  break;
+	      case 2: /* words.  */
+		  tcg_gen_sub_i32(tcg_res, zero, tcg_op1);
+		  break;
+	      case 3: /* doublewords.  */
+		  tcg_gen_sub_i64(tcg_res, zero, tcg_op1);
+		  break;
 	      }
-	      simd_ld(tcg_op1, freg_offs_n, 3, false);
-	      tcg_gen_neg_i64(tcg_res, tcg_op1);
-	      simd_st(tcg_res, freg_offs_d, 3);
-	  } else {
-	      TCGv_i64 zero = tcg_temp_new_i64();
-	      zero = tcg_const_i64(0);
-	      for (i = 0; i < (is_q ? 16 : 8); i += ebytes)
-	      {
-		  simd_ld(tcg_op1, freg_offs_n + i, size, true);
-		  switch (size) {
-		  case 0: /* bytes */
-		      gen_helper_neon_sub_u8(tcg_res, zero, tcg_op1);
-		      break;
-		  case 1: /* halfwords.  */
-		      gen_helper_neon_sub_u16(tcg_res, zero, tcg_op1);
-		      break;
-		  case 2: /* words.  */
-		      tcg_gen_sub_i32(tcg_res, zero, tcg_op1);
-		      break;
-		  case 3: /* doublewords.  */
-		      tcg_gen_sub_i64(tcg_res, zero, tcg_op1);
-		      break;
-		  }
-		  simd_st(tcg_res, freg_offs_d + i, size);
-	      }
-	      tcg_temp_free_i64(zero);
+	      simd_st(tcg_res, freg_offs_d + i, size);
 	  }
+	  tcg_temp_free_i64(zero);
+	}
+	break;
+    case 0x0c: /* FCMGT / FCMGE */
+    case 0x0d: /* FCMEQ / FCMLE */
+    case 0x0e: /* FCMLT */
+	{
+	  /* Only the vector variants of these instructions are handled
+	     here.  */
+	  TCGv_ptr fpst = get_fpstatus_ptr();
+	  TCGv_i64 zero = tcg_temp_new_i64();
+	  /* Floating-point zero happens to look the same as integer zero.  */
+	  zero = tcg_const_i64(0);
+
+	  if (size == 3 && !is_q) {
+	      unallocated_encoding(s);
+	      return;
+	  }
+
+	  for (i = 0; i < (is_q ? 16 : 8); i += ebytes) {
+	      simd_ld(tcg_op1, freg_offs_n + i, size, false);
+
+	      switch (opcode) {
+	      case 0x0c:
+		  if (is_u) {
+		      /* GE */
+		      if (size == 2) {
+			  gen_helper_neon_cge_f32(tcg_res, tcg_op1, zero, fpst);
+		      } else {
+			  gen_helper_neon_cge_f64(tcg_res, tcg_op1, zero, fpst);
+		      }
+		  } else {
+		      /* GT */
+		      if (size == 2) {
+			  gen_helper_neon_cgt_f32(tcg_res, tcg_op1, zero, fpst);
+		      } else {
+			  gen_helper_neon_cgt_f64(tcg_res, tcg_op1, zero, fpst);
+		      }
+		  }
+		  break;
+	      case 0x0d:
+		  if (is_u) {
+		      /* LE */
+		      if (size == 2) {
+			  gen_helper_neon_cge_f32(tcg_res, zero, tcg_op1, fpst);
+		      } else {
+			  gen_helper_neon_cge_f64(tcg_res, zero, tcg_op1, fpst);
+		      }
+		  } else {
+		      /* EQ */
+		      if (size == 2) {
+			  gen_helper_neon_ceq_f32(tcg_res, tcg_op1, zero, fpst);
+		      } else {
+			  gen_helper_neon_ceq_f64(tcg_res, tcg_op1, zero, fpst);
+		      }
+		  }
+		  break;
+	      case 0x0e:
+		  /* LT */
+		  if (size == 2) {
+		      gen_helper_neon_cgt_f32(tcg_res, zero, tcg_op1, fpst);
+		  } else {
+		      gen_helper_neon_cgt_f64(tcg_res, zero, tcg_op1, fpst);
+		  }
+	      }
+	      simd_st(tcg_res, freg_offs_d + i, size);
+	  }
+	  
+	  tcg_temp_free_i64(zero);
+	  tcg_temp_free_ptr(fpst);
+	}
+	break;
+    case 0x1f: /* FSQRT */
+	{
+	  TCGv_ptr fpst = get_fpstatus_ptr();
+
+	  if (size == 3 && !is_q) {
+	      unallocated_encoding(s);
+	      return;
+	  }
+
+	  for (i = 0; i < (is_q ? 16 : 8); i += ebytes) {
+	      simd_ld(tcg_op1, freg_offs_n + i, size, false);
+	      if (size == 2) {
+		  gen_helper_vfp_sqrts(tcg_res, tcg_op1, fpst);
+	      } else {
+		  gen_helper_vfp_sqrtd(tcg_res, tcg_op1, fpst);
+	      }
+	      simd_st(tcg_res, freg_offs_d + i, size);
+	  }
+
+	  tcg_temp_free_ptr(fpst);
 	}
 	break;
     default:
@@ -3740,6 +3985,141 @@ static void handle_simd_shifti(DisasContext *s, uint32_t insn)
         simd_st(tcg_zero, freg_offs_d + sizeof(float64), 3);
         tcg_temp_free_i64(tcg_zero);
     }
+}
+
+/* SIMD vector * indexed element operations */
+static void handle_simd_vecxelem(DisasContext *s, uint32_t insn)
+{
+    int rd = get_bits(insn, 0, 5);
+    int rn = get_bits(insn, 5, 5);
+    int rm = get_bits(insn, 16, 4);
+    int opcode = get_bits(insn, 12, 4);
+    int lbit = get_bits(insn, 21, 1);
+    int mbit = get_bits(insn, 20, 1);
+    int hbit = get_bits(insn, 11, 1);
+    int size = get_bits(insn, 22, 2);
+    int ebytes = 1 << size;
+    bool is_q = get_bits(insn, 30, 1);
+    bool is_u = get_bits(insn, 29, 1);
+    int freg_offs_d = offsetof(CPUARMState, vfp.regs[rd * 2]);
+    int freg_offs_n = offsetof(CPUARMState, vfp.regs[rn * 2]);
+    int freg_offs_m;
+    TCGv_i64 tcg_res = tcg_temp_new_i64();
+    TCGv_i64 tcg_op1 = tcg_temp_new_i64();
+    TCGv_i64 tcg_op2 = tcg_temp_new_i64();
+    TCGv_i64 tcg_acc;
+    bool uses_accum = false;
+    bool is_float = false;
+    int index, i;
+
+    opcode = (is_u << 4) | opcode;
+
+    switch (opcode) {
+    case 0x09: /* FMUL */
+	is_float = true;
+	size = (size & 1) + 2;
+	ebytes = 1 << size;
+	is_u = true;
+	break;
+    case 0x10: /* MLA */
+    case 0x14: /* MLS */
+	uses_accum = true;
+    }
+
+    if (is_float) {
+	rm |= mbit << 4;
+	switch (((size & 1) << 1) | lbit) {
+	case 0x0:
+	case 0x1:
+	    index = (hbit << 1) | lbit;
+	    break;
+	case 0x2:
+	    index = hbit;
+	    break;
+	default:
+	    unallocated_encoding(s);
+	    return;
+	}
+    } else {
+	switch (size) {
+	case 0x1:
+	    index = (hbit << 2) | (lbit << 1) | mbit;
+	    break;
+	case 0x2:
+	    index = (hbit << 1) | lbit;
+	    rm |= mbit << 4;
+	    break;
+	default:
+	    unallocated_encoding(s);
+	    return;
+	}
+    }
+    
+    if (uses_accum) {
+        tcg_acc = tcg_temp_new_i64();
+    }
+    
+    freg_offs_m = offsetof(CPUARMState, vfp.regs[rm * 2]);
+    
+    simd_ld(tcg_op2, freg_offs_m + ebytes * index, size, !is_u);
+    
+    for (i = 0; i < (is_q ? 16 : 8); i += ebytes) {
+	simd_ld(tcg_op1, freg_offs_n + i, size, !is_u);
+	if (uses_accum) {
+	    simd_ld(tcg_acc, freg_offs_d + i, size, !is_u);
+	}
+
+	switch (opcode) {
+	case 0x10: /* MLA */
+	    tcg_gen_mul_i64(tcg_res, tcg_op1, tcg_op2);
+	    tcg_gen_add_i64(tcg_res, tcg_acc, tcg_res);
+	    break;
+	case 0x14: /* MLS */
+	    tcg_gen_mul_i64(tcg_res, tcg_op1, tcg_op2);
+	    tcg_gen_sub_i64(tcg_res, tcg_acc, tcg_res);
+	    break;
+	case 0x08: /* MUL */
+	    tcg_gen_mul_i64(tcg_res, tcg_op1, tcg_op2);
+	    break;
+	case 0x09: /* FMUL */
+	    {
+	      TCGv_ptr fpst = get_fpstatus_ptr();
+	      
+	      if (size == 3 && !is_q) {
+		  unallocated_encoding(s);
+		  return;
+	      }
+	      
+	      if (size == 2) {
+		  gen_helper_vfp_muls(tcg_res, tcg_op1, tcg_op2, fpst);
+	      } else {
+		  gen_helper_vfp_muld(tcg_res, tcg_op1, tcg_op2, fpst);
+	      }
+	      
+	      tcg_temp_free_ptr(fpst);
+	    }
+	    break;
+	default:
+	    /* Other cases not handled yet */
+	    unallocated_encoding(s);
+	    return;
+	}
+	
+	simd_st(tcg_res, freg_offs_d + i, size);
+    }
+    
+    if (!is_q) {
+	TCGv_i64 tcg_zero = tcg_const_i64(0);
+	simd_st(tcg_zero, freg_offs_d + sizeof(float64), 3);
+	tcg_temp_free_i64(tcg_zero);
+    }
+    
+    if (uses_accum) {
+	tcg_temp_free_i64(tcg_acc);
+    }
+    tcg_temp_free_i64(tcg_res);
+    tcg_temp_free_i64(tcg_op1);
+    tcg_temp_free_i64(tcg_op2);
 }
 
 /* SIMD load/store multiple (post-indexed) */
@@ -4321,7 +4701,9 @@ void disas_a64_insn(CPUARMState *env, DisasContext *s)
 	} else if (!get_bits(insn, 31, 1) && !get_bits(insn, 23, 1) &&
 		   get_bits(insn, 10, 1)) {
 	    handle_simd_shifti(s, insn);
-        } else {
+        } else if (!get_bits(insn, 10, 1) && !get_bits(insn, 31, 1)) {
+	    handle_simd_vecxelem(s, insn);
+	} else {
             goto unknown_insn;
         }
         break;
@@ -4458,8 +4840,7 @@ void disas_a64_insn(CPUARMState *env, DisasContext *s)
 		   get_bits(insn, 17, 5) == 0x18 &&
 		   get_bits(insn, 10, 2) == 0x2) {
 	    if (get_bits(insn, 12, 5) == 0x1b) {
-		/* ADDP unsupported.  */
-		goto unknown_insn;
+		handle_addp(s, insn);
 	    } else if (get_bits (insn, 22, 1)) {
 		handle_scpdp (s, insn);
 	    } else {
