@@ -79,6 +79,7 @@ static TCGv_i64 cpu_F0d, cpu_F1d;
 
 #include "exec/gen-icount.h"
 
+extern int is_print;
 static const char *regnames[] =
     { "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
       "r8", "r9", "r10", "r11", "r12", "r13", "r14", "pc" };
@@ -10166,12 +10167,14 @@ done_generating:
     *tcg_ctx.gen_opc_ptr = INDEX_op_end;
 
 #ifdef DEBUG_DISAS
-    if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
-        qemu_log("----------------\n");
-        qemu_log("IN: %s\n", lookup_symbol(pc_start));
-        log_target_disas(env, pc_start, dc->pc - pc_start,
-                         dc->thumb | (dc->bswap_code << 1));
-        qemu_log("\n");
+    if (is_print) {
+        if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
+            qemu_log("----------------\n");
+            qemu_log("IN: %s\n", lookup_symbol(pc_start));
+            log_target_disas(env, pc_start, dc->pc - pc_start,
+                             dc->thumb | (dc->bswap_code << 1));
+            qemu_log("\n");
+        }
     }
 #endif
 

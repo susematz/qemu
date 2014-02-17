@@ -71,6 +71,8 @@ static void usage(void);
 static const char *interp_prefix = CONFIG_QEMU_INTERP_PREFIX;
 const char *qemu_uname_release = CONFIG_UNAME_RELEASE;
 
+unsigned long log_eip;
+int is_print = 1;
 /* XXX: on x86 MAP_GROWSDOWN only works if ESP <= address + 32, so
    we allocate a bigger stack. Need a better solution, for example
    by remapping the process stack directly at the right place */
@@ -3501,6 +3503,11 @@ static void handle_arg_strace(const char *arg)
     do_strace = 1;
 }
 
+static void handle_arg_addr(const char *arg)
+{
+    log_eip = strtoul(arg, NULL, 16);
+}
+
 static void handle_arg_version(const char *arg)
 {
     printf("qemu-" TARGET_NAME " version " QEMU_VERSION QEMU_PKGVERSION
@@ -3553,6 +3560,8 @@ static const struct qemu_argument arg_table[] = {
      "",           "run in singlestep mode"},
     {"strace",     "QEMU_STRACE",      false, handle_arg_strace,
      "",           "log system calls"},
+    {"addr",       "",                 true, handle_arg_addr,
+    "",            "print cpu state before exec instruction at eip"},
     {"version",    "QEMU_VERSION",     false, handle_arg_version,
      "",           "display version information and exit"},
     {NULL, NULL, false, NULL, NULL, NULL}
