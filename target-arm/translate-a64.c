@@ -619,7 +619,11 @@ static void handle_orri(DisasContext *s, uint32_t insn)
     }
 
     if (setflags) {
-        gen_helper_pstate_add(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        if (is_32bit) {
+            gen_helper_pstate_add32(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        } else {
+            gen_helper_pstate_add(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        }
     }
 
     tcg_temp_free_i64(tcg_op2);
