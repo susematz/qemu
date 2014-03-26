@@ -47,6 +47,8 @@ static TCGv_i32 pstate;
 static TCGv_i64 cpu_exclusive_addr;
 static TCGv_i64 cpu_exclusive_val;
 static TCGv_i64 cpu_exclusive_high;
+extern long log_eip;
+extern int always_log;
 #ifdef CONFIG_USER_ONLY
 static TCGv_i64 cpu_exclusive_test;
 static TCGv_i64 cpu_exclusive_info;
@@ -98,33 +100,40 @@ void cpu_dump_state_a64(CPUARMState *env, FILE *f, fprintf_function cpu_fprintf,
 {
     int i;
 
-    cpu_fprintf(f, "PC=%016"PRIx64"  SP=%016"PRIx64"\n", env->pc, env->sp);
-    for(i = 0; i < 31; i++) {
-        cpu_fprintf(f, "X%02d=%016"PRIx64, i, env->xregs[i]);
-        if ((i % 4) == 3)
-            cpu_fprintf(f, "\n");
-        else
-            cpu_fprintf(f, " ");
-    }
-    cpu_fprintf(f, "XZR=%016"PRIx64"\n", env->xregs[31]);
-    cpu_fprintf(f, "PSTATE=%c%c%c%c\n",
-        env->pstate & PSTATE_N ? 'n' : '.',
-        env->pstate & PSTATE_Z ? 'z' : '.',
-        env->pstate & PSTATE_C ? 'c' : '.',
-        env->pstate & PSTATE_V ? 'v' : '.');
-    cpu_fprintf(f, "\n");
-
-    if (1) { //flags & CPU_DUMP_FPU) {
-        int numvfpregs = 32;
-        for (i = 0; i < numvfpregs; i++) {
-            uint64_t v = float64_val(env->vfp.regs[i * 2]);
-            uint64_t v1 = float64_val(env->vfp.regs[(i * 2) + 1]);
-            if (!v && !v1) continue;
-            cpu_fprintf(f, "d%02d.0=%016" PRIx64 " " "d%02d.0=%016" PRIx64 "\n",
-                        i, v, i, v1);
+    if (always_log || (log_eip && log_eip == env->pc)) {
+        cpu_fprintf(f, "PC=%016"PRIx64"  SP=%016"PRIx64"\n", env->pc, env->sp);
+        cpu_fprintf(f, "[CPUSTATE] ");
+        for(i = 0; i < 31; i++) {
+            cpu_fprintf(f, "X%02d=%016"PRIx64, i, env->xregs[i]);
+            if ((i % 4) == 3) {
+                cpu_fprintf(f, "\n");
+                cpu_fprintf(f, "[CPUSTATE] ");
+            }
+            else
+                cpu_fprintf(f, " ");
         }
-        cpu_fprintf(f, "FPSCR: %08x\n", (int)env->vfp.xregs[ARM_VFP_FPSCR]);
+        cpu_fprintf(f, "XZR=%016"PRIx64"\n", env->xregs[31]);
+        cpu_fprintf(f, "[CPUSTATE] ");
+        cpu_fprintf(f, "PSTATE=%c%c%c%c\n",
+            env->pstate & PSTATE_N ? 'n' : '.',
+            env->pstate & PSTATE_Z ? 'z' : '.',
+            env->pstate & PSTATE_C ? 'c' : '.',
+            env->pstate & PSTATE_V ? 'v' : '.');
+        cpu_fprintf(f, "\n");
+
+        if (1) { //flags & CPU_DUMP_FPU) {
+            int numvfpregs = 32;
+            for (i = 0; i < numvfpregs; i++) {
+                uint64_t v = float64_val(env->vfp.regs[i * 2]);
+                uint64_t v1 = float64_val(env->vfp.regs[(i * 2) + 1]);
+                if (!v && !v1) continue;
+                cpu_fprintf(f, "d%02d.0=%016" PRIx64 " " "d%02d.0=%016" PRIx64 "\n",
+                            i, v, i, v1);
+            }
+            cpu_fprintf(f, "FPSCR: %08x\n", (int)env->vfp.xregs[ARM_VFP_FPSCR]);
+        }
     }
+
 }
 
 static int get_bits(uint32_t inst, int start, int len)
@@ -385,9 +394,15 @@ static void handle_msr(DisasContext *s, uint32_t insn)
     int crn = get_bits(insn, 12, 4);
     int op2 = get_bits(insn, 5, 3);
 
-    /* XXX what are these? */
-    if (op0 == 3 && op1 == 3 && op2 == 2 && !crm && crn == 13) {
-        tcg_gen_st_i64(cpu_reg(dest), cpu_env, offsetof(CPUARMState, sr.tpidr_el0));
+    /* Instructions for accessing special-purpose registers */
+    if (op0 == 3 && crn == 4 && op2 == 0) {
+        TCGv_i32 t2 = tcg_temp_new_i32();
+        tcg_gen_trunc_i64_i32(t2, cpu_reg(dest));
+        tcg_gen_shri_i32(t2, t2, 28);
+        tcg_gen_st_i32(t2, cpu_env, offsetof(CPUARMState, pstate));
+        tcg_temp_free_i32(t2);
+    } else if (op0 == 3 && op1 == 3 && op2 == 2 && !crm && crn == 13) {
+        tcg_gen_st32_i64(cpu_reg(dest), cpu_env, offsetof(CPUARMState, sr.tpidr_el0));
     } else if (op0 == 3 && op1 == 3 && (op2 == 0 || op2 == 1) && crm == 4 && crn == 4) {
         /* XXX this is wrong! */
         tcg_gen_st32_i64(cpu_reg(dest), cpu_env,
@@ -613,7 +628,11 @@ static void handle_orri(DisasContext *s, uint32_t insn)
     }
 
     if (setflags) {
-        gen_helper_pstate_add(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        if (is_32bit) {
+            gen_helper_pstate_add32(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        } else {
+            gen_helper_pstate_add(pstate, pstate, tcg_dst, cpu_reg(31), tcg_dst);
+        }
     }
 
     tcg_temp_free_i64(tcg_op2);
