@@ -385,9 +385,15 @@ static void handle_msr(DisasContext *s, uint32_t insn)
     int crn = get_bits(insn, 12, 4);
     int op2 = get_bits(insn, 5, 3);
 
-    /* XXX what are these? */
-    if (op0 == 3 && op1 == 3 && op2 == 2 && !crm && crn == 13) {
-        tcg_gen_st_i64(cpu_reg(dest), cpu_env, offsetof(CPUARMState, sr.tpidr_el0));
+    /* Instructions for accessing special-purpose registers */
+    if (op0 == 3 && crn == 4 && op1 == 3 && op2 == 0 && crm != 4) {
+        TCGv_i32 t2 = tcg_temp_new_i32();
+        tcg_gen_trunc_i64_i32(t2, cpu_reg(dest));
+        tcg_gen_shri_i32(t2, t2, 28);
+        tcg_gen_st_i32(t2, cpu_env, offsetof(CPUARMState, pstate));
+        tcg_temp_free_i32(t2);
+    } else if (op0 == 3 && op1 == 3 && op2 == 2 && !crm && crn == 13) {
+        tcg_gen_st32_i64(cpu_reg(dest), cpu_env, offsetof(CPUARMState, sr.tpidr_el0));
     } else if (op0 == 3 && op1 == 3 && (op2 == 0 || op2 == 1) && crm == 4 && crn == 4) {
         /* XXX this is wrong! */
         tcg_gen_st32_i64(cpu_reg(dest), cpu_env,
