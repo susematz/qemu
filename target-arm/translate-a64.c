@@ -99,13 +99,10 @@ void cpu_dump_state_a64(CPUARMState *env, FILE *f, fprintf_function cpu_fprintf,
     int i;
 
     cpu_fprintf(f, "PC=%016"PRIx64"  SP=%016"PRIx64"\n", env->pc, env->sp);
-    cpu_fprintf(f, "[CPUSTATE] ");
     for(i = 0; i < 31; i++) {
         cpu_fprintf(f, "X%02d=%016"PRIx64, i, env->xregs[i]);
-        if ((i % 4) == 3) {
+        if ((i % 4) == 3) 
             cpu_fprintf(f, "\n");
-            cpu_fprintf(f, "[CPUSTATE] ");
-        }
         else
             cpu_fprintf(f, " ");
     }
@@ -128,7 +125,6 @@ void cpu_dump_state_a64(CPUARMState *env, FILE *f, fprintf_function cpu_fprintf,
         }
         cpu_fprintf(f, "FPSCR: %08x\n", (int)env->vfp.xregs[ARM_VFP_FPSCR]);
     }
-
 }
 
 static int get_bits(uint32_t inst, int start, int len)
