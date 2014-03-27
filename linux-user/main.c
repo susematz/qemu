@@ -44,8 +44,6 @@ int gdbstub_port;
 envlist_t *envlist;
 const char *cpu_model;
 unsigned long mmap_min_addr;
-unsigned long log_eip;
-int always_log = 1;
 #if defined(CONFIG_USE_GUEST_BASE)
 unsigned long guest_base;
 int have_guest_base;
@@ -3503,12 +3501,6 @@ static void handle_arg_strace(const char *arg)
     do_strace = 1;
 }
 
-static void handle_arg_addr(const char *arg)
-{
-    always_log = 0;
-    log_eip = strtoul(arg, NULL, 16);
-}
-
 static void handle_arg_version(const char *arg)
 {
     printf("qemu-" TARGET_NAME " version " QEMU_VERSION QEMU_PKGVERSION
@@ -3561,8 +3553,6 @@ static const struct qemu_argument arg_table[] = {
      "",           "run in singlestep mode"},
     {"strace",     "QEMU_STRACE",      false, handle_arg_strace,
      "",           "log system calls"},
-    {"addr",     "",      true, handle_arg_addr,
-     "",           "only print cpu status of executing such eip"},
     {"version",    "QEMU_VERSION",     false, handle_arg_version,
      "",           "display version information and exit"},
     {NULL, NULL, false, NULL, NULL, NULL}

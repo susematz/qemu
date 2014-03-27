@@ -68,8 +68,6 @@ static TCGv_i32 cpu_CF, cpu_NF, cpu_VF, cpu_ZF;
 static TCGv_i32 cpu_exclusive_addr;
 static TCGv_i32 cpu_exclusive_val;
 static TCGv_i32 cpu_exclusive_high;
-extern long log_eip;
-extern int always_log;
 #ifdef CONFIG_USER_ONLY
 static TCGv_i32 cpu_exclusive_test;
 static TCGv_i32 cpu_exclusive_info;
@@ -10168,14 +10166,12 @@ done_generating:
     *tcg_ctx.gen_opc_ptr = INDEX_op_end;
 
 #ifdef DEBUG_DISAS
-    if (always_log || (log_eip && log_eip == env->pc)) {
-        if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
-            qemu_log("----------------\n");
-            qemu_log("IN: %s\n", lookup_symbol(pc_start));
-            log_target_disas(env, pc_start, dc->pc - pc_start,
-                             dc->thumb | (dc->bswap_code << 1));
-            qemu_log("\n");
-        }
+    if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
+        qemu_log("----------------\n");
+        qemu_log("IN: %s\n", lookup_symbol(pc_start));
+        log_target_disas(env, pc_start, dc->pc - pc_start,
+                         dc->thumb | (dc->bswap_code << 1));
+        qemu_log("\n");
     }
 #endif
 
