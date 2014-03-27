@@ -101,7 +101,7 @@ void cpu_dump_state_a64(CPUARMState *env, FILE *f, fprintf_function cpu_fprintf,
     cpu_fprintf(f, "PC=%016"PRIx64"  SP=%016"PRIx64"\n", env->pc, env->sp);
     for(i = 0; i < 31; i++) {
         cpu_fprintf(f, "X%02d=%016"PRIx64, i, env->xregs[i]);
-        if ((i % 4) == 3) 
+        if ((i % 4) == 3)
             cpu_fprintf(f, "\n");
         else
             cpu_fprintf(f, " ");
