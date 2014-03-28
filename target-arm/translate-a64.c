@@ -1008,7 +1008,7 @@ static void ldst_do_vec(DisasContext *s, int dest, TCGv_i64 tcg_addr_real,
 }
 
 static void ldst_do_gpr(DisasContext *s, int dest, TCGv_i64 tcg_addr, int size,
-                        bool is_store, bool is_signed)
+                        bool is_store, bool is_signed, int regsize)
 {
     if (is_store) {
         switch (size) {
@@ -1027,14 +1027,34 @@ static void ldst_do_gpr(DisasContext *s, int dest, TCGv_i64 tcg_addr, int size,
         }
     } else {
         if (is_signed) {
-            /* XXX check what impact regsize has */
+            /* regsize restricts the sign extend scope of the destition register */
             switch (size) {
             case 0:
-                tcg_gen_qemu_ld8s(cpu_reg(dest), tcg_addr, get_mem_index(s));
-                break;
+                {
+                    if (regsize == 2) {
+                        TCGv_i32 w = tcg_temp_new_i32();
+                        tcg_gen_trunc_i64_i32(w, cpu_reg(dest));
+                        tcg_gen_qemu_ld8s(w, tcg_addr, get_mem_index(s));
+                        tcg_gen_extu_i32_i64(cpu_reg(dest), w);
+                        tcg_temp_free(w);
+                    } else {
+                        tcg_gen_qemu_ld8s(cpu_reg(dest), tcg_addr, get_mem_index(s));
+                    }
+                    break;
+                }
             case 1:
-                tcg_gen_qemu_ld16s(cpu_reg(dest), tcg_addr, get_mem_index(s));
-                break;
+                {
+                    if (regsize == 2) {
+                        TCGv_i32 w = tcg_temp_new_i32();
+                        tcg_gen_trunc_i64_i32(w, cpu_reg(dest));
+                        tcg_gen_qemu_ld16s(w, tcg_addr, get_mem_index(s));
+                        tcg_gen_extu_i32_i64(cpu_reg(dest), w);
+                        tcg_temp_free(w);
+                    } else {
+                        tcg_gen_qemu_ld16s(cpu_reg(dest), tcg_addr, get_mem_index(s));
+                    }
+                    break;
+                }
             case 2:
                 tcg_gen_qemu_ld32s(cpu_reg(dest), tcg_addr, get_mem_index(s));
                 break;
@@ -1062,7 +1082,7 @@ static void ldst_do_gpr(DisasContext *s, int dest, TCGv_i64 tcg_addr, int size,
 }
 
 static void ldst_do(DisasContext *s, int dest, TCGv_i64 tcg_addr, int size,
-                    bool is_store, bool is_signed, bool is_vector, uint32_t insn)
+                    bool is_store, bool is_signed, bool is_vector, uint32_t insn, int regsize)
 {
 #ifdef HACK_WATCHPOINTS
     TCGv_i32 tcg_insn = tcg_const_i32(insn);
@@ -1072,7 +1092,7 @@ static void ldst_do(DisasContext *s, int dest, TCGv_i64 tcg_addr, int size,
     if (is_vector) {
         ldst_do_vec(s, dest, tcg_addr, size, is_store);
     } else {
-        ldst_do_gpr(s, dest, tcg_addr, size, is_store, is_signed);
+        ldst_do_gpr(s, dest, tcg_addr, size, is_store, is_signed, regsize);
     }
 }
 
@@ -1133,9 +1153,9 @@ static void handle_stp(DisasContext *s, uint32_t insn)
         tcg_gen_addi_i64(tcg_addr, tcg_addr, offset);
     }
 
-    ldst_do(s, rt, tcg_addr, size, is_store, is_signed, is_vector, insn);
+    ldst_do(s, rt, tcg_addr, size, is_store, is_signed, is_vector, insn, size);
     tcg_gen_addi_i64(tcg_addr, tcg_addr, 1 << size);
-    ldst_do(s, rt2, tcg_addr, size, is_store, is_signed, is_vector, insn);
+    ldst_do(s, rt2, tcg_addr, size, is_store, is_signed, is_vector, insn, size);
     tcg_gen_subi_i64(tcg_addr, tcg_addr, 1 << size);
 
     if (wback) {
@@ -1242,10 +1262,10 @@ static void handle_ldarx(DisasContext *s, uint32_t insn)
 	    gen_store_exclusive (s, rs, rt, rt2, tcg_addr, size, is_pair);
 	}
     } else {
-	ldst_do_gpr(s, rt, tcg_addr, size, is_store, false);
+	ldst_do_gpr(s, rt, tcg_addr, size, is_store, false, size);
 	if (is_pair) {
 	    tcg_gen_addi_i64(tcg_addr, tcg_addr, 1 << size);
-	    ldst_do_gpr(s, rt2, tcg_addr, size, is_store, false);
+	    ldst_do_gpr(s, rt2, tcg_addr, size, is_store, false, size);
 	}
     }
 
@@ -1321,7 +1341,7 @@ static void handle_literal(DisasContext *s, uint32_t insn)
         goto out;
     }
 
-    ldst_do(s, dest, tcg_addr, size, false, is_signed, is_vector, insn);
+    ldst_do(s, dest, tcg_addr, size, false, is_signed, is_vector, insn, size);
 
 out:
     tcg_temp_free_i64(tcg_addr);
@@ -1329,6 +1349,7 @@ out:
 
 static void handle_ldst(DisasContext *s, uint32_t insn)
 {
+    //TODO, if wback && dest = src, then unallocated or nop
     int dest = get_reg(insn);
     int source = get_bits(insn, 5, 5);
     int offset;
@@ -1366,22 +1387,15 @@ static void handle_ldst(DisasContext *s, uint32_t insn)
             unallocated_encoding(s);
             return;
         }
-    } else if (!opc1) {
+    } else if (size >= 2 && !opc1) {
         regsize = (size == 3) ? 3 : 2;
-    } else {
-        if (size == 3) {
-            /* prefetch */
-            if (!is_store) {
-                unallocated_encoding(s);
-            }
-            return;
-        }
-        if (size == 2 && !is_store) {
-            unallocated_encoding(s);
-        }
+    } else if (opc1){
         is_store = false;
         is_signed = true;
-        regsize = is_store ? 3 : 2;
+        regsize = get_bits(insn, 22, 1) ? 2 : 3;
+    } else {
+        is_signed = false;
+        regsize = 2;
     }
 
     if (is_imm12) {
@@ -1399,8 +1413,8 @@ static void handle_ldst(DisasContext *s, uint32_t insn)
     if (!postindex) {
         ldst_calc_index(s, tcg_addr, is_reg_offset, offset, size);
     }
-
-    ldst_do(s, dest, tcg_addr, size, is_store, is_signed, is_vector, insn);
+    
+    ldst_do(s, dest, tcg_addr, size, is_store, is_signed, is_vector, insn, regsize);
 
     if (postindex) {
         ldst_calc_index(s, tcg_addr, is_reg_offset, offset, size);
